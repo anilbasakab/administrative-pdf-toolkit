@@ -2,3 +2,4 @@ streamlit
 pdf2docx
 pypdf
 python-docx
+Pillow
