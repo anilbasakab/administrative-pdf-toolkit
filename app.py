@@ -9,6 +9,8 @@ import html
 import importlib
 import logging
 import numpy as np
+import shutil
+import subprocess
 import tempfile
 import threading
 import os
@@ -23,7 +25,7 @@ logger = logging.getLogger(__name__)
 # ==========================================
 
 APP_NAME = "AB PDF Toolkit"
-APP_VERSION = "2.5"
+APP_VERSION = "2.6"
 APP_URL = "https://ab-pdf-toolkit.streamlit.app/"
 # Your repository, such as "yourname/yourrepo". The feedback link appears once this is set.
 GITHUB_REPO = "anilbasakab/administrative-pdf-toolkit"
@@ -59,6 +61,7 @@ LOGO_SVG = (
 TOOL_GROUPS = {
     "Convert": [
         "PDF to Word",
+        "Word to PDF",
         "Batch PDF to Word",
         "Images to PDF",
         "PDF to Images",
@@ -102,6 +105,7 @@ TOOL_DESCRIPTIONS = {
     "Reverse PDF": "Flip the page order, last page first.",
     "Compress PDF": "Shrink large PDFs and see the size saved.",
     "PDF Information": "Check page count, file size and metadata.",
+    "Word to PDF": "Turn a Word document into a PDF.",
     "PDF to Images": "Save PDF pages as PNG or JPG pictures.",
     "Extract Text": "Pull the text out of a PDF into a text file.",
     "OCR Scanned PDF": "Make scanned pages searchable and selectable.",
@@ -123,6 +127,7 @@ TOOL_KEYWORDS = {
     "Reverse PDF": "order flip backwards",
     "Compress PDF": "reduce shrink smaller size optimize",
     "PDF Information": "details metadata properties pages",
+    "Word to PDF": "docx doc convert document",
     "PDF to Images": "png jpg jpeg picture photo export convert",
     "Extract Text": "txt copy words convert",
     "OCR Scanned PDF": "scan recognize searchable hindi english text",
@@ -144,6 +149,7 @@ TOOL_ICONS = {
     "Reverse PDF": '<path d="m21 16-4 4-4-4"/><path d="M17 20V4"/><path d="m3 8 4-4 4 4"/><path d="M7 4v16"/>',
     "Compress PDF": '<path d="M4 14h6v6"/><path d="M20 10h-6V4"/><path d="m14 10 7-7"/><path d="m3 21 7-7"/>',
     "PDF Information": '<circle cx="12" cy="12" r="10"/><path d="M12 16v-4"/><path d="M12 8h.01"/>',
+    "Word to PDF": '<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/><path d="M12 18v-6"/><path d="m9 15 3 3 3-3"/>',
     "PDF to Images": '<rect x="3" y="5" width="18" height="14" rx="2"/><circle cx="8.5" cy="10" r="1.5"/><path d="m21 15-4-4L7 19"/>',
     "Extract Text": '<path d="M4 7V5h16v2"/><path d="M12 5v14"/><path d="M9 19h6"/>',
     "OCR Scanned PDF": '<path d="M3 7V4h3"/><path d="M18 4h3v3"/><path d="M21 17v3h-3"/><path d="M6 20H3v-3"/><path d="M7 9h10"/><path d="M7 12h10"/><path d="M7 15h6"/>',
@@ -287,6 +293,16 @@ MAX_IMAGE_PIXELS = 50_000_000
 MAX_OCR_PAGES = 50
 OCR_DPI = 200
 PAGE_MARGIN = 28
+MAX_WORD_MEGABYTES = 50
+WORD_TIMEOUT_SECONDS = 180
+WORD_UNREADABLE_MESSAGE = (
+    "This file can't be read as a Word document. "
+    "It may be damaged, or it may not be a real Word file."
+)
+WORD_PASSWORD_MESSAGE = (
+    "This Word document is password-protected. "
+    "Please remove the password in Word and upload it again."
+)
 TESSDATA_DIR = ASSETS_DIR / "tessdata"
 OCR_LANGUAGES = {
     "English": "eng",
@@ -446,6 +462,86 @@ def convert_pdf_to_word(data):
     )
 
     return docx_data, text_complete, page_count
+
+
+def find_libreoffice():
+    """LibreOffice does the Word conversion. Cloud installs it from packages.txt."""
+    return (
+        shutil.which("soffice")
+        or shutil.which("libreoffice")
+        or next(
+            (
+                path
+                for path in (
+                    r"C:\Program Files\LibreOffice\program\soffice.exe",
+                    r"C:\Program Files (x86)\LibreOffice\program\soffice.exe",
+                )
+                if os.path.exists(path)
+            ),
+            None,
+        )
+    )
+
+
+def word_file_type(data):
+    """Return ".docx" or ".doc", or raise a plain error for anything else."""
+    if zipfile.is_zipfile(io.BytesIO(data)):
+        with zipfile.ZipFile(io.BytesIO(data)) as archive:
+            if "word/document.xml" in archive.namelist():
+                return ".docx"
+
+        raise PdfFileError(WORD_UNREADABLE_MESSAGE)
+
+    # Older .doc files, and password-protected .docx files, share this format
+    if data.startswith(b"\xd0\xcf\x11\xe0"):
+        if "EncryptedPackage".encode("utf-16-le") in data:
+            raise PdfFileError(WORD_PASSWORD_MESSAGE)
+
+        return ".doc"
+
+    raise PdfFileError(WORD_UNREADABLE_MESSAGE)
+
+
+def convert_word_to_pdf(data):
+    suffix = word_file_type(data)
+
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temp_dir:
+        word_path = Path(temp_dir) / f"input{suffix}"
+        word_path.write_bytes(data)
+
+        # A separate profile lets two visitors convert at the same time
+        profile = (Path(temp_dir) / "profile").as_uri()
+
+        try:
+            subprocess.run(
+                [
+                    find_libreoffice(),
+                    "--headless",
+                    "--norestore",
+                    f"-env:UserInstallation={profile}",
+                    "--convert-to",
+                    "pdf",
+                    "--outdir",
+                    temp_dir,
+                    str(word_path),
+                ],
+                capture_output=True,
+                timeout=WORD_TIMEOUT_SECONDS,
+            )
+
+        except subprocess.TimeoutExpired as error:
+            raise PdfFileError(
+                "This document took too long to convert. It may be very large, "
+                "or it may need a password."
+            ) from error
+
+        pdf_path = Path(temp_dir) / "input.pdf"
+
+        # LibreOffice doesn't report a bad file: it just makes no PDF
+        if not pdf_path.exists():
+            raise PdfFileError(WORD_UNREADABLE_MESSAGE)
+
+        return pdf_path.read_bytes()
 
 
 def word_file_name(pdf_name):
@@ -1212,7 +1308,7 @@ staff, small businesses and anyone handling paperwork.
 
 **How it's built.** It's an independent project written in Python and hosted
 on Streamlit Community Cloud. It relies on open-source libraries including
-PyMuPDF, pypdf, pdf2docx, Pillow and the Tesseract OCR engine.
+PyMuPDF, pypdf, pdf2docx, Pillow, LibreOffice and the Tesseract OCR engine.
 """
     )
 
@@ -1230,7 +1326,7 @@ def render_privacy():
 - Your files are sent to the server that runs this app, so the tools can work on them.
 - The app doesn't save your files permanently. It holds them in the server's
   memory while your browser tab is open.
-- PDF to Word writes temporary files while it converts, and deletes them straight after.
+- PDF to Word and Word to PDF write temporary files while they convert, and delete them straight after.
 - Your latest result stays in memory so you can download it again, until you
   make another result or your session ends.
 - Small page previews stay in memory for about 15 minutes.
@@ -1269,6 +1365,11 @@ FAQ_ITEMS = [
         "Why was the site slow to open?",
         "The free hosting puts the app to sleep when nobody has used it for a "
         "while. The first visitor after that may wait while it wakes up."
+    ),
+    (
+        "Why does my Word document look a little different as a PDF?",
+        "If it uses a font this service doesn't have, a similar font is used "
+        "instead, which can shift the layout slightly."
     ),
     (
         "Why can't I select the text in my scanned PDF?",
@@ -2379,6 +2480,74 @@ elif selected_tool == "Reverse PDF":
 
         except Exception:
             show_failure("Reversing this PDF")
+# ==========================================
+# WORD TO PDF
+# ==========================================
+
+elif selected_tool == "Word to PDF":
+    render_tool_header(
+        "Word to PDF",
+        "Turn a Word document into a PDF."
+    )
+
+    tool_step("Upload your Word document")
+
+    file = st.file_uploader(
+        "Upload Word document",
+        type=["docx", "doc"],
+        key="word_to_pdf_upload",
+        label_visibility="collapsed"
+    )
+
+    if file:
+        with tool_errors("Conversion"):
+            st.caption(size_text(file.size))
+
+            source = result_source([file])
+
+            if file.size > MAX_WORD_MEGABYTES * 1024 * 1024:
+                st.warning(
+                    f"Please use a document of {MAX_WORD_MEGABYTES} MB or smaller."
+                )
+
+            elif not find_libreoffice():
+                st.error("Word to PDF isn't available at the moment.")
+
+            else:
+                tool_step("Convert")
+
+                st.caption(
+                    "The layout can shift slightly if your document uses "
+                    "fonts this service doesn't have."
+                )
+
+                if st.button("Convert to PDF", type="primary", width="stretch"):
+                    data = file.getvalue()
+
+                    with st.spinner("Converting to PDF. This can take a minute..."):
+                        output = convert_word_to_pdf(data)
+
+                    save_result(
+                        source,
+                        "Your PDF is ready.",
+                        "Download PDF",
+                        output,
+                        f"{file_stem(file.name)}.pdf",
+                        facts=(
+                            ("Pages", pdf_page_count(output)),
+                            ("Word size", size_text(file.size)),
+                            ("PDF size", size_text(len(output))),
+                        )
+                    )
+
+                show_result(source)
+
+                result = st.session_state.get("tool_result")
+
+                if result and result["source"] == source and result["data"]:
+                    show_page_previews(result["data"], [(0, 0)])
+
+
 # ==========================================
 # 10. DELETE PAGES
 # ==========================================
