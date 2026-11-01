@@ -26,7 +26,7 @@ APP_NAME = "AB PDF Toolkit"
 APP_VERSION = "2.5"
 APP_URL = "https://ab-pdf-toolkit.streamlit.app/"
 # Your repository, such as "yourname/yourrepo". The feedback link appears once this is set.
-GITHUB_REPO = ""
+GITHUB_REPO = "anilbasakab/administrative-pdf-toolkit"
 ASSETS_DIR = Path(__file__).resolve().parent / "assets"
 
 st.set_page_config(
