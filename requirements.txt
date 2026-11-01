@@ -1,5 +1,8 @@
-streamlit
+
+streamlit>=1.66
 pdf2docx
 pypdf
 python-docx
 Pillow
+pymupdf
+cryptography
