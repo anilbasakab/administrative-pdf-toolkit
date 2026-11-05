@@ -1358,7 +1358,7 @@ FAQ_ITEMS = [
     ),
     (
         "How large can my files be?",
-        "Up to 200 MB per file. Large files take longer, and OCR handles "
+        "Up to 50 MB per file. Large files take longer, and OCR handles "
         f"up to {MAX_OCR_PAGES} pages at a time."
     ),
     (
